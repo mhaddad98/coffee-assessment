@@ -1,0 +1,162 @@
+version: "3.1"
+
+services:
+  elasticsearch:
+    container_name: temporal-elasticsearch
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - xpack.security.enabled=false
+    image: elasticsearch:${ELASTICSEARCH_VERSION}
+    networks:
+      - coffee-assessment-network
+    expose:
+      - 9200
+    volumes:
+      - /var/lib/elasticsearch/data
+  postgresql:
+    container_name: temporal-postgresql
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    image: postgres:${POSTGRESQL_VERSION}
+    networks:
+      - coffee-assessment-network
+    expose:
+      - 5432
+    volumes:
+      - /var/lib/postgresql/data
+  temporal:
+    container_name: temporal
+    depends_on:
+      - postgresql
+      - elasticsearch
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=true
+      - ES_SEEDS=elasticsearch
+      - ES_VERSION=v7
+    image: temporalio/auto-setup:${TEMPORAL_VERSION}
+    networks:
+      - coffee-assessment-network
+    ports:
+      - 7233:7233
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+  temporal-admin-tools:
+    container_name: temporal-admin-tools
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    image: temporalio/admin-tools:${TEMPORAL_VERSION}
+    networks:
+      - coffee-assessment-network
+    stdin_open: true
+    tty: true
+  temporal-ui:
+    container_name: temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_NOTIFY_ON_NEW_VERSION=false
+    image: temporalio/ui:${TEMPORAL_UI_VERSION}
+    networks:
+      - coffee-assessment-network
+    ports:
+      - 8080:8080
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    networks:
+      - coffee-assessment-network
+    ports:
+      - 15672:15672
+      - 5672:5672
+      - 15675:15675
+      - 1883:1883
+    environment:
+      RABBITMQ_PLUGINS: "rabbitmq_mqtt,rabbitmq_web_mqtt,rabbitmq_management"
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    command:
+      [
+        "sh",
+        "-c",
+        "rabbitmq-plugins enable rabbitmq_mqtt rabbitmq_web_mqtt && rabbitmq-server",
+      ]
+
+  server_DB:
+    image: mysql
+    container_name: server_DB
+    environment:
+      MYSQL_ROOT_PASSWORD: p@ssw0rd
+      MYSQL_DATABASE: coffe_assessment
+      MYSQL_USER: db_user
+      MYSQL_PASSWORD: p@ssw0rd
+    networks:
+      - coffee-assessment-network
+    ports:
+      - "3306:3306"
+    volumes:
+      - server_DB_volume:/var/lib/mysql
+  server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.server
+    container_name: coffe-assessment-server
+    networks:
+      - coffee-assessment-network
+    environment:
+      DB_NAME: coffe_assessment
+      DB_USER: db_user
+      DB_PASSWORD: p@ssw0rd
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      - server_DB
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: coffe-assessment-worker
+    networks:
+      - coffee-assessment-network
+    depends_on:
+      - server_DB
+      - temporal
+    restart: on-failure
+  client:
+    build:
+      context: ./frontend/src
+      dockerfile: Dockerfile
+    container_name: coffe-assessment-client
+    networks:
+      - coffee-assessment-network
+    ports:
+      - "5000:5000"
+
+networks:
+  coffee-assessment-network:
+    driver: bridge
+    name: coffee-assessment-network
+
+volumes:
+  server_DB_volume:
+    driver: local
+    driver_opts:
+      type: none
+      device: ${server_DB_volume_local_path}
+      o: bind
